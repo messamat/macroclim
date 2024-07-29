@@ -1,14 +1,20 @@
 #### Working directory and packages ####
 # wd <- "C:/Users/user2380/Documents/Julie/macroclim/data/"
-wd <- "/home/julie/macroclim/data/"
-setwd(wd) 
+#wd <- "/home/julie/macroclim/data/"
+#setwd(wd) 
 
-pacman::p_load(data.table, dplyr, tidyverse, stringr, tibble,#data wrangling
+pacman::p_load(data.table, dplyr, igraph, tidyverse, stringr, tibble,#data wrangling
+               rprojroot,
                terra, tidyterra, #gis
                foreach, doParallel # to parallelize
 )
-
+rootdir <- rprojroot::find_root(rprojroot::has_dir('src'))
+wd <- file.path(rootdir, 'data')
 select <- dplyr::select
+
+#Paths
+in_rivers_geom <- file.path(wd,"gis", "HydroRIVERS_hybas5_family_level.shp")
+in_rivers_downstream <- file.path(wd, "hydroatlas", "hydroshed_downstream_segments_v2.csv")
 
 #### Loading data and data wrangling ####
 
@@ -16,19 +22,18 @@ select <- dplyr::select
 bbox_terra <- c(-10.5,32.702, 34.856, 71.31)
 
 # Shapefile of selected rivers
-rivers_selec <-terra::vect(paste0(wd,"gis/HydroRIVERS_hybas5_family_level.shp"),
+rivers_selec <-terra::vect(in_rivers_geom,
                            extent=bbox_terra) #already cropped to the right extent
 
 # Dataframe of river attributes
-rivers_selec_df <- rivers_selec %>%
-  as.data.frame() %>%
-  select(HYRIV_ID, NEXT_DOWN, MAIN_RIV, LENGTH_KM, HYBAS_L12) %>%
-  as.data.table()
+rivers_selec_dt <- rivers_selec %>%
+  as.data.table() %>%
+  .[, .(HYRIV_ID, NEXT_DOWN, MAIN_RIV, LENGTH_KM, HYBAS_L12)]
 
 # Dataframe with the ID of all downstream reaches for each river segment
 # (IDs in column 'ALL_DOWN' are in the order from up to downstream)
-river_downstream_segments  <- read.csv(paste0(wd,"hydroatlas/hydroshed_downstream_segments_v2.csv"),
-                                       header=T, sep=",", stringsAsFactors = FALSE)
+river_downstream_segments  <- fread(in_rivers_downstream,
+                                    header=T, sep=",", stringsAsFactors = FALSE)
 
 # # Spatial join between HydroRIVERS and Hybas_level3
 # hybas_hyriv <- read.csv(paste0(wd,"hydroatlas/hydroriver_hybas3.csv"),
@@ -37,10 +42,10 @@ river_downstream_segments  <- read.csv(paste0(wd,"hydroatlas/hydroshed_downstrea
 
 # Data wrangling on river_downstream_segments to prepare the loop
 river_downstream_segments <- river_downstream_segments %>%
-  filter(HYRIV_ID %in% rivers_selec_df$HYRIV_ID) %>%  # keeping rivers from the selection
-  filter(ALL_DOWN != "0") %>% # removing outlets, only if directional scenario = only up -> down distances
-  mutate(ALL_DOWN = str_replace_all(ALL_DOWN, ', 0$','')) %>%
-  as.data.table()
+  .[(HYRIV_ID %in% rivers_selec_dt$HYRIV_ID) &  # keeping rivers from the selection
+      (ALL_DOWN != 0),] %>% # removing outlets, only if directional scenario = only up -> down distances
+  .[, ALL_DOWN := str_replace_all(ALL_DOWN, ', 0$','')] 
+
   # left_join(hybas_hyriv, by = "HYRIV_ID") %>% # adding hybas_level3 information
   # filter(!is.na(HYBAS_ID))
 
@@ -49,7 +54,7 @@ river_downstream_segments <- river_downstream_segments %>%
 # hybas3_vec <- hybas3_vec[order(hybas3_vec)]
 
 #### Parallelization parameters #### 
-n.cores <- 10
+n.cores <- 4
 my.cluster <- parallel::makeCluster(
   n.cores,
   type = "PSOCK"
@@ -123,7 +128,8 @@ print("Starting loop")
 Sys.time()
 
 # Creation of a dataframe "length_down" giving the length between outlets of pairs of river reaches.
-# The foreach loop is adding rows/ blocks of rows to "length_down". One row/ block of rows ("bound" object) has the following characteristics:
+# The foreach loop is adding rows/ blocks of rows to "length_down". 
+# One row/ block of rows ("bound" object) has the following characteristics:
 # id of one considered HydroRIVER reach, id of one of its downstream reaches,
 # the length between the outlets of the two reaches, and the "boundary" (Virgilio Hermoso's definition to use in Marxan)
 # If a given river has 3 downstream reaches, the associated "bound" object should have 3 rows.
@@ -143,9 +149,9 @@ length_down <- foreach (i = 500:1000,
                      for (j in 1:n){
 
                        if (j == 1){
-                         # length <- (rivers_selec_df %>% filter(HYRIV_ID ==  all_down[j]))$LENGTH_KM # obtaining the length of the downstream reach "j"
-                         # length <-rivers_selec_df[which(rivers_selec_df$HYRIV_ID ==  all_down[j]),]$LENGTH_KM
-                         length <-rivers_selec_df[HYRIV_ID ==  all_down[j],LENGTH_KM]
+                         # length <- (rivers_selec_dt %>% filter(HYRIV_ID ==  all_down[j]))$LENGTH_KM # obtaining the length of the downstream reach "j"
+                         # length <-rivers_selec_dt[which(rivers_selec_dt$HYRIV_ID ==  all_down[j]),]$LENGTH_KM
+                         length <-rivers_selec_dt[HYRIV_ID ==  all_down[j],LENGTH_KM]
                          boundary <- 1/(sqrt(length))
                          bound <- c(river_downstream_segments[i, 'HYRIV_ID'],
                                     all_down[j],
@@ -160,8 +166,8 @@ length_down <- foreach (i = 500:1000,
                        }
                        else if (length < 100 & j > 1){ # currently there is a limit set at 100km: pairs of sites that are further apart are not considered
                          # adding the length of the j-th downstream reach to the "length" previously calculated (because the IDs are in order from up to downstream)
-                         # length <- length + (rivers_selec_df %>% filter(HYRIV_ID ==  all_down[j]))$LENGTH_KM
-                         length <- length + rivers_selec_df[HYRIV_ID ==  all_down[j],LENGTH_KM]
+                         # length <- length + (rivers_selec_dt %>% filter(HYRIV_ID ==  all_down[j]))$LENGTH_KM
+                         length <- length + rivers_selec_dt[HYRIV_ID ==  all_down[j],LENGTH_KM]
                          boundary <- 1/(sqrt(length))
                          bound <- rbind(bound,
                                         c(river_downstream_segments[i, 'HYRIV_ID'],
@@ -203,8 +209,8 @@ print("Saved")
 #                           n = length(all_down)
 #                           
 #                           hyriv = river_downstream_segments$HYRIV_ID[i]
-#                           mainriv = (rivers_selec_df %>% filter(HYRIV_ID == hyriv))$MAIN_RIV
-#                           same_catch <- (rivers_selec_df %>% filter(MAIN_RIV == mainriv))$HYRIV_ID
+#                           mainriv = (rivers_selec_dt %>% filter(HYRIV_ID == hyriv))$MAIN_RIV
+#                           same_catch <- (rivers_selec_dt %>% filter(MAIN_RIV == mainriv))$HYRIV_ID
 #                           river_sub <- river_downstream_segments %>%
 #                             filter(HYRIV_ID %in% same_catch) %>%
 #                             filter(HYRIV_ID != hyriv) %>%
@@ -229,7 +235,7 @@ print("Saved")
 #                               
 #                               reaches_to_sum = union(all_down[-(n1:length(all_down))], all_down2[-(n2:length(all_down2))])
 #                               
-#                               length <- sum((rivers_selec_df %>% filter(HYRIV_ID %in% reaches_to_sum))$LENGTH_KM)
+#                               length <- sum((rivers_selec_dt %>% filter(HYRIV_ID %in% reaches_to_sum))$LENGTH_KM)
 #                               boundary <- 1/(sqrt(length))
 #                               
 #                             }
