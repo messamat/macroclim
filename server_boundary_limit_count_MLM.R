@@ -1,10 +1,15 @@
+#wd <- "/home/julie/macroclim/data/"
+#setwd(wd) 
+
 pacman::p_load(data.table, dplyr, igraph, tidyverse, stringr, tibble,#data wrangling
                rprojroot, RcppAlgos,
                terra, tidyterra, #gis
                foreach, doParallel # to parallelize
 )
-rootdir <- rprojroot::find_root(rprojroot::has_dir('src'))
-wd <- file.path(rootdir, 'data')
+# rootdir <- rprojroot::find_root(rprojroot::has_dir('src'))
+# wd <- file.path(rootdir, 'data')
+wd <- "/home/julie/macroclim/data/"
+setwd(wd) 
 select <- dplyr::select
 
 #Paths
