@@ -6,11 +6,11 @@ pacman::p_load(data.table, dplyr, igraph, tidyverse, stringr, tibble,#data wrang
                terra, tidyterra, #gis
                foreach, doParallel # to parallelize
 )
-# rootdir <- rprojroot::find_root(rprojroot::has_dir('src'))
-# wd <- file.path(rootdir, 'data')
-wd <- "/home/julie/macroclim/data/"
-setwd(wd) 
-select <- dplyr::select
+rootdir <- rprojroot::find_root(rprojroot::has_dir('src'))
+wd <- file.path(rootdir, 'data')
+# wd <- "/home/julie/macroclim/data/"
+# setwd(wd) 
+# select <- dplyr::select
 
 #Paths
 in_rivers_geom <- file.path(wd,"gis", "HydroRIVERS_hybas5_family_level.shp")
@@ -109,8 +109,8 @@ downdist_hydrorivers_basin <- function(in_rivers_format, in_main_riv,
     sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down')
     dist_mat_fast <- basin_sel_k1[, ..sel_cols] %>%
       setnames(sel_cols,
-               c('HYRIV_ID_from', 'HYRIVID_to', 'dist_km')
-    )
+               c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km')
+      )
   }
   return(dist_mat_fast)
 }
@@ -122,282 +122,100 @@ dist_dt_all <- lapply(unique_main, function(basin_id) {
                                in_main_riv = basin_id,
                                quiet=F)
   }
-})
+}) %>% 
+  rbindlist(use.names=T) %>%
+  merge(rivers_inland[, .(HYRIV_ID, MAIN_RIV)], 
+        by.x='HYRIV_ID_from', by.y='HYRIV_ID')
+
 
 #### Strahler order method #####################################################
-rivers_inland <- rivers_inland[MAIN_RIV == 20431728,]
+rivers_sub <- rivers_inland[MAIN_RIV == 20268761,]
 
-plot(igraph::graph_from_data_frame(
-  rivers_inland[!is.na(LENGTH_KM_down),],  
-  directed = T))
+# plot(igraph::graph_from_data_frame(
+#   rivers_sub[!is.na(LENGTH_KM_down),],
+#   directed = T))
 
 sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down', 'ORD_STRA', 'ORD_STRA_down')
 new_cols <- c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to')
 
 #Compute distance from outlet of first-order streams to outlet of second-order streams
-k_max <- max(rivers_inland$ORD_STRA_down, na.rm=T)
+k_max <- max(rivers_sub$ORD_STRA_down, na.rm=T)
 k_dt <- expand.grid(1:k_max, 1:k_max) %>%
   setDT %>%
   setnames(c('k_i', "k_j")) %>%
   .[order(k_i, k_j)] %>%
   .[!(k_i==1 & k_j<=2) & k_j >= k_i,]
 
-all_acc <- rivers_inland[ORD_STRA==1 & ORD_STRA_down==2, ..sel_cols] %>% 
+all_acc <- rivers_sub[ORD_STRA==1 & ORD_STRA_down==2, ..sel_cols] %>% 
   setnames(sel_cols, new_cols) 
-k_comb_index = 1
 
-##########
-k_i <- k_dt[k_comb_index, k_i]
-k_j <- k_dt[k_comb_index, k_j]
-
-k_list_sub <- rivers_inland[ORD_STRA==k_i & ORD_STRA_down==k_j, ..sel_cols]
-
-if (nrow(k_list_sub) > 0) {
-  to_next <- k_list_sub %>% 
-    copy %>%
-    setnames(sel_cols, new_cols)
+downdist_hydrorivers_basin_manual_inner <- function(
+    in_rivers_format, in_all_acc, strahler_order_from, strahler_order_to) {
   
-  acc_to_k <- merge(all_acc, k_list_sub, 
-                    by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                    suffix=c('_upst', '_extra')) 
+  k_list_sub <- in_rivers_format[ORD_STRA==strahler_order_from & 
+                                   ORD_STRA_down==strahler_order_to, 
+                                 ..sel_cols]
   
-  while (nrow(acc_to_k) > 0) {
-    acc_to_k_format <- acc_to_k[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
-      .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
-            'ORD_STRA_from', 'ORD_STRA_down',
-            'dist_km_acc'), with=F] %>%
-      setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
-               c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
+  if (nrow(k_list_sub) > 0) {
+    to_next <- k_list_sub %>% 
+      copy %>%
+      setnames(sel_cols, new_cols)
     
-    # acc_to_k <- acc_to_k[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-    #   . [, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-    #          'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-    #          'dist_km_acc'), with=F] %>%
-    #   setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-    #            c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-    
-    all_acc <- rbindlist(list(all_acc, to_next, acc_to_k_format), use.names=T)
-    
-    
-    ####REMOVE DUPLICATES
     acc_to_k <- merge(all_acc, k_list_sub, 
                       by.x='HYRIV_ID_to', by.y='HYRIV_ID',
                       suffix=c('_upst', '_extra')) 
-  }
-
-  } else {
-    all_acc <- rbindlist(list(all_acc, to_next), use.names=T)
-  }
-  
-  k_comb_index = k_comb_index + 1
-}  else {
-  #break
-  k_comb_index = k_comb_index + 1
-}
-
-##OLD###########
-####################################################################################
-#################################################################################
-
-if 
-k_list <- rivers_inland[ORD_STRA==k & !is.na(LENGTH_KM_down), ..sel_cols]
-
-#Deal with segments that do no increment in stream order
-same_kupdown <- merge(all_acc, k2_list[(ORD_STRA == ORD_STRA_down),], 
-                      by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                      suffix=c('_upst', '_extra'))
-
-
-#Check second order streams -----------------------------------------------------
-k2_list <- rivers_inland[ORD_STRA==2 & !is.na(LENGTH_KM_down), ..sel_cols]
-
-#Deal with segments that do no increment in stream order
-same_kdown <- merge(all_acc, k2_list[(ORD_STRA == ORD_STRA_down),], 
-                by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                suffix=c('_upst', '_extra'))
-
-same_kdown_format <- k2_list[(ORD_STRA == ORD_STRA_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols)
-
-while (nrow(same_kdown)>0) {
-  same_kdown_acc <- same_kdown[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
-    .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
-          'ORD_STRA_from', 'ORD_STRA_down',
-          'dist_km_acc'), with=F] %>%
-    setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
-             c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-  
-  all_acc <- rbindlist(
-    list(
-      all_acc,
-      same_kdown_format,
-      same_kdown_acc
-    ),
-    use.names=T
-  )
-    
-  same_kdown <- merge(all_acc, k2_list, 
-                      by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                      suffix=c('_upst', '_extra')) %>%
-    .[(ORD_STRA == ORD_STRA_down) & 
-        !(NEXT_DOWN %in% unique(all_acc$HYRIV_ID_to)),]
-}
-
-#Deal with segments that increment in stream order
-k2_down <- rivers_inland[ORD_STRA==2 & !is.na(LENGTH_KM_down) &
-                           (ORD_STRA != ORD_STRA_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols)
-
-acc_to_k2_down <- merge(all_acc, k2_down, 
-                   by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
-                   suffix=c('_upst', '_extra')) %>%
-  .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-  .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        'dist_km_acc'), with=F] %>%
-  setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-           c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-
-all_acc <- rbindlist(list(all_acc, k2_down, acc_to_k2_down), use.names=T)
- 
-#Check third order streams -----------------------------------------------------
-k3_list <- rivers_inland[ORD_STRA==3 & !is.na(LENGTH_KM_down), ..sel_cols]
-
-#Deal with segments that do no increment in stream order
-same_kdown <- merge(all_acc, k3_list[(ORD_STRA == ORD_STRA_down),], 
-                   by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                   suffix=c('_upst', '_extra'))
-
-same_kdown_format <- k3_list[(ORD_STRA == ORD_STRA_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols)
-
-while (nrow(same_kdown)>0) {
-  same_kdown_acc <- same_kdown[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
-    .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
-          'ORD_STRA_from', 'ORD_STRA_down',
-          'dist_km_acc'), with=F] %>%
-    setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
-             c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-  
-  all_acc <- rbindlist(
-    list(
-      all_acc,
-      same_kdown_format,
-      same_kdown_acc
-    ),
-    use.names=T
-  )
-  
-  same_kdown <- merge(all_acc, k3_list, 
-                      by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                      suffix=c('_upst', '_extra')) %>%
-    .[(ORD_STRA == ORD_STRA_down) & 
-        !(NEXT_DOWN %in% unique(all_acc$HYRIV_ID_to)),]
-}
-
-#Deal with segments that increment in stream order
-k3_down <- rivers_inland[ORD_STRA==3 & !is.na(LENGTH_KM_down) &
-                           (ORD_STRA != ORD_STRA_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols)
-
-if (nrow(k3_down)) {
-  acc_to_k3_down <- merge(all_acc, k3_down, 
-                          by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
+    if (nrow(acc_to_k) > 0) {
+      while (nrow(acc_to_k) > 0) {
+        acc_to_k_format <- acc_to_k[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
+          .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
+                'ORD_STRA_from', 'ORD_STRA_down',
+                'dist_km_acc'), with=F] %>%
+          setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
+                   c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
+        
+        # acc_to_k <- acc_to_k[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
+        #   . [, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
+        #          'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
+        #          'dist_km_acc'), with=F] %>%
+        #   setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
+        #            c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
+        
+        all_acc <- rbindlist(list(all_acc, to_next, acc_to_k_format), use.names=T)
+        
+        
+        ####REMOVE DUPLICATES
+        acc_to_k <- merge(all_acc, k_list_sub, 
+                          by.x='HYRIV_ID_to', by.y='HYRIV_ID',
                           suffix=c('_upst', '_extra')) %>%
-    .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-    .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-          'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-          'dist_km_acc'), with=F] %>%
-    setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-             c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))=
-  all_acc <- rbindlist(list(all_acc, k3_down, acc_to_k3_down), use.names=T)
+          .[!(paste(HYRIV_ID_from, NEXT_DOWN, sep='_') %in% 
+                all_acc[, paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')]),]
+      }
+    } else {
+      all_acc <- rbindlist(list(all_acc, to_next), use.names=T)
+    }
+    remove(k_list_sub, to_next, acc_to_k)
+  }  
+  
+  return(all_acc)
+}
+
+for (k_comb_index in 1:nrow(k_dt)) {
+  k_i <- k_dt[k_comb_index, k_i]
+  k_j <- k_dt[k_comb_index, k_j]
+  print(k_i)
+  print(k_j)
+  
+  all_acc <- downdist_hydrorivers_basin_manual_inner(
+    in_rivers_format = rivers_sub,
+    in_all_acc = all_acc,
+    strahler_order_from = k_i,
+    strahler_order_to = k_j
+  )
 }
 
 
-
-
-
-
-
-
-####################3
-
-#Loop through each segment level, keeping only those downstream 
-#of a segment that must be kept
-while (length(new_ids) > 0) {
-  #print(length(new_ids))
-  #Keep all segments downstream of those already kept
-  new_ids <- netdt[get(id_colname) %in% new_ids, 
-                   get(nextid_colname)]
-  ids_keep <- c(ids_keep, new_ids)
-  #Only keep segments which still have another segment upstream
-  netdt <- netdt[get(id_colname) %in% 
-                   c(get(nextid_colname), ids_keep),]
-}
-
-k2_to_k3 <- rivers_inland[ORD_STRA==2 & !is.na(LENGTH_KM_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols)
-
-acc_to_k3 <- merge(to_k2, k2_to_k3, 
-                  by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
-                  suffix=c('_upst', '_extra')) %>%
-  .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-  .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        'dist_km_acc'), with=F] %>%
-  setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-           c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-
-to_k3 <- rbind(acc_to_k3, k2_to_k3)
-
-
-k3_to_k4 <- rivers_inland[ORD_STRA==3 & !is.na(LENGTH_KM_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols) %>%
-  .[, ORD_STRA_to := ORD_STRA_from + 1]
-
-acc_to_k4 <- merge(to_k3, k3_to_k4, 
-                   by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
-                   suffix=c('_upst', '_extra'),
-                   allow.cartesian=TRUE) %>%
-  .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-  .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        'dist_km_acc'), with=F] %>%
-  setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-           c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-
-to_k4 <- rbind(acc_to_k4, k3_to_k4)
-
-k4_to_k5 <- rivers_inland[ORD_STRA==4 & !is.na(LENGTH_KM_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols) %>%
-  .[, ORD_STRA_to := ORD_STRA_from + 1]
-
-acc_to_k5 <- merge(to_k4, k4_to_k5, 
-                   by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
-                   suffix=c('_upst', '_extra'),
-                   allow.cartesian=TRUE) %>%
-  .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-  .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        'dist_km_acc'), with=F] %>%
-  setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-           c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-
-to_k5 <- rbind(acc_to_k5, k4_to_k5)
-
-k5_to_k6 <- rivers_inland[ORD_STRA==5 & !is.na(LENGTH_KM_down), ..sel_cols] %>% 
-  setnames(sel_cols, new_cols) %>%
-  .[, ORD_STRA_to := ORD_STRA_from + 1]
-
-acc_to_k6 <- merge(to_k5, k5_to_k6, 
-                   by.x='HYRIV_ID_to', by.y='HYRIV_ID_from',
-                   suffix=c('_upst', '_extra'),
-                   allow.cartesian=TRUE) %>%
-  .[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-  .[, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        'dist_km_acc'), with=F] %>%
-  setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-           c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
-
-to_k6 <- rbind(acc_to_k6, k5_to_k6)
+# check<- all_acc[!duplicated(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')),]
+# check2 <-dist_dt_all[MAIN_RIV==20268761,]
+# dist_dt_all[MAIN_RIV==20268761,][
+#   !(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_') %in%
+#     all_acc[,  paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')]),]
