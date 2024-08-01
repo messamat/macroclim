@@ -127,7 +127,7 @@ dist_dt_all <- lapply(unique_main, function(basin_id) {
   merge(rivers_inland[, .(HYRIV_ID, MAIN_RIV)], 
         by.x='HYRIV_ID_from', by.y='HYRIV_ID')
 
-################################################################################
+###################################################################################
 #### Strahler order method #####################################################
 
 #Compute distance between strahler_order_from and strahler_order_to
@@ -141,19 +141,18 @@ downdist_hydrorivers_basin_manual_inner <- function(
   k_list_sub <- in_rivers_format[ORD_STRA==strahler_order_from & 
                                    ORD_STRA_down==strahler_order_to, 
                                  ..sel_cols]
-  bas_sel <- k_list_sub[, unique(MAIN_RIV)]
   
   if (nrow(k_list_sub) > 0) {
     #Compute extra distance for those segments with strahler_order_from and 
     #connected to a downstream segmentwith strahler_order_to
-    to_next <- copy(k_list_sub) %>% 
+    to_next <- k_list_sub %>% 
+      copy %>%
       setnames(sel_cols, new_cols)
     in_all_acc <- rbind(in_all_acc, to_next)
     
     #Get all accumulated distances upstream connected to those segments
-    acc_to_k <- merge(in_all_acc[(ORD_STRA_to==strahler_order_from) & 
-                                   (dist_km < max_accdist) &
-                                   (MAIN_RIV %in% bas_sel),], 
+    acc_to_k <- merge(in_all_acc[ORD_STRA_to==strahler_order_from & 
+                                dist_km < max_accdist,], 
                       k_list_sub, 
                       by.x='HYRIV_ID_to', by.y='HYRIV_ID',
                       suffix=c('_upst', '_extra')) 
@@ -169,11 +168,9 @@ downdist_hydrorivers_basin_manual_inner <- function(
         acc_to_k_format <- acc_to_k[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
           .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
                 'ORD_STRA_from', 'ORD_STRA_down',
-                'dist_km_acc', 'MAIN_RIV_extra'), with=F] %>%
-          setnames(c('NEXT_DOWN', 'dist_km_acc', 
-                     'ORD_STRA_from', 'ORD_STRA_down', 'MAIN_RIV_extra'),
-                   c('HYRIV_ID_to', 'dist_km', 
-                     'ORD_STRA_from', 'ORD_STRA_to', 'MAIN_RIV'))
+                'dist_km_acc'), with=F] %>%
+          setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
+                   c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
         
         #Extend all accumulated distances upstream connected to those segments
         #by the length of that segment
@@ -185,9 +182,8 @@ downdist_hydrorivers_basin_manual_inner <- function(
         
         #When multiple segments of the same stream order are linked one after 
         #the other, need to extend the new accumulated distances multiple times
-        acc_to_k <- merge(in_all_acc[(ORD_STRA_to==strahler_order_from) & 
-                                       (dist_km < max_accdist) &
-                                       (MAIN_RIV %in% bas_sel),],
+        acc_to_k <- merge(in_all_acc[ORD_STRA_to==strahler_order_from & 
+                                    dist_km < max_accdist,],
                           k_list_sub, 
                           by.x='HYRIV_ID_to', by.y='HYRIV_ID',
                           suffix=c('_upst', '_extra')) 
@@ -205,10 +201,8 @@ downdist_hydrorivers_basin_manual_inner <- function(
 downdist_hydrorivers_basin_manual_outer <- function(
     in_rivers_format, max_accdist = Inf) {
   
-  sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down', 
-                'ORD_STRA', 'ORD_STRA_down', 'MAIN_RIV')
-  new_cols <- c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km', 
-                'ORD_STRA_from', 'ORD_STRA_to', 'MAIN_RIV')
+  sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down', 'ORD_STRA', 'ORD_STRA_down')
+  new_cols <- c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to')
   
   #Compute distance from outlet of first-order streams to outlet of second-order streams
   k_max <- max(in_rivers_format$ORD_STRA_down, na.rm=T) #Get maximum Strahler order
@@ -242,7 +236,7 @@ downdist_hydrorivers_basin_manual_outer <- function(
 
 tictoc::tic()
 dist_dt_all_strahler <- downdist_hydrorivers_basin_manual_outer(
-  in_rivers_format = rivers_inland[nsegs_network < 6000,])
+  rivers_inland[nsegs_network < 6000,])
 tictoc::toc()
 
 
