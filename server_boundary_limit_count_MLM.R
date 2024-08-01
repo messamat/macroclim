@@ -120,102 +120,134 @@ dist_dt_all <- lapply(unique_main, function(basin_id) {
   if (basin_id != 20498112) {
     downdist_hydrorivers_basin(in_rivers_format = rivers_inland,
                                in_main_riv = basin_id,
-                               quiet=F)
+                               quiet=T)
   }
 }) %>% 
   rbindlist(use.names=T) %>%
   merge(rivers_inland[, .(HYRIV_ID, MAIN_RIV)], 
         by.x='HYRIV_ID_from', by.y='HYRIV_ID')
 
-
+################################################################################
 #### Strahler order method #####################################################
-rivers_sub <- rivers_inland[MAIN_RIV == 20268761,]
 
-# plot(igraph::graph_from_data_frame(
-#   rivers_sub[!is.na(LENGTH_KM_down),],
-#   directed = T))
-
-sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down', 'ORD_STRA', 'ORD_STRA_down')
-new_cols <- c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to')
-
-#Compute distance from outlet of first-order streams to outlet of second-order streams
-k_max <- max(rivers_sub$ORD_STRA_down, na.rm=T)
-k_dt <- expand.grid(1:k_max, 1:k_max) %>%
-  setDT %>%
-  setnames(c('k_i', "k_j")) %>%
-  .[order(k_i, k_j)] %>%
-  .[!(k_i==1 & k_j<=2) & k_j >= k_i,]
-
-all_acc <- rivers_sub[ORD_STRA==1 & ORD_STRA_down==2, ..sel_cols] %>% 
-  setnames(sel_cols, new_cols) 
-
+#Compute distance between strahler_order_from and strahler_order_to
+#Accummulating distance from all previous strahler orders
 downdist_hydrorivers_basin_manual_inner <- function(
-    in_rivers_format, in_all_acc, strahler_order_from, strahler_order_to) {
+    in_rivers_format, in_all_acc, strahler_order_from, strahler_order_to,
+    sel_cols, new_cols, max_accdist = Inf) {
   
+  #Get all segments with strahler_order_from and connected to a downstream segment 
+  #with strahler_order_to 
   k_list_sub <- in_rivers_format[ORD_STRA==strahler_order_from & 
                                    ORD_STRA_down==strahler_order_to, 
                                  ..sel_cols]
+  bas_sel <- k_list_sub[, unique(MAIN_RIV)]
   
   if (nrow(k_list_sub) > 0) {
-    to_next <- k_list_sub %>% 
-      copy %>%
+    #Compute extra distance for those segments with strahler_order_from and 
+    #connected to a downstream segmentwith strahler_order_to
+    to_next <- copy(k_list_sub) %>% 
       setnames(sel_cols, new_cols)
+    in_all_acc <- rbind(in_all_acc, to_next)
     
-    acc_to_k <- merge(all_acc, k_list_sub, 
+    #Get all accumulated distances upstream connected to those segments
+    acc_to_k <- merge(in_all_acc[(ORD_STRA_to==strahler_order_from) & 
+                                   (dist_km < max_accdist) &
+                                   (MAIN_RIV %in% bas_sel),], 
+                      k_list_sub, 
                       by.x='HYRIV_ID_to', by.y='HYRIV_ID',
                       suffix=c('_upst', '_extra')) 
+    
     if (nrow(acc_to_k) > 0) {
-      while (nrow(acc_to_k) > 0) {
+      #As long as there are accumulated distances upstream that need to be
+      #extended by one segments
+      in_all_acc_diff <- 1
+      
+      while (in_all_acc_diff > 0) {
+        in_all_acc_n <- in_all_acc[, .N]
+        
         acc_to_k_format <- acc_to_k[, dist_km_acc := dist_km + LENGTH_KM_down] %>%
           .[, c('HYRIV_ID_from', 'NEXT_DOWN', 
                 'ORD_STRA_from', 'ORD_STRA_down',
-                'dist_km_acc'), with=F] %>%
-          setnames(c('NEXT_DOWN', 'dist_km_acc', 'ORD_STRA_from', 'ORD_STRA_down'),
-                   c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
+                'dist_km_acc', 'MAIN_RIV_extra'), with=F] %>%
+          setnames(c('NEXT_DOWN', 'dist_km_acc', 
+                     'ORD_STRA_from', 'ORD_STRA_down', 'MAIN_RIV_extra'),
+                   c('HYRIV_ID_to', 'dist_km', 
+                     'ORD_STRA_from', 'ORD_STRA_to', 'MAIN_RIV'))
         
-        # acc_to_k <- acc_to_k[, dist_km_acc := dist_km_upst + dist_km_extra] %>%
-        #   . [, c('HYRIV_ID_from', 'HYRIV_ID_to_extra', 
-        #          'ORD_STRA_from_upst', 'ORD_STRA_to_extra',
-        #          'dist_km_acc'), with=F] %>%
-        #   setnames(c('HYRIV_ID_to_extra', 'dist_km_acc', 'ORD_STRA_from_upst', 'ORD_STRA_to_extra'),
-        #            c('HYRIV_ID_to', 'dist_km', 'ORD_STRA_from', 'ORD_STRA_to'))
+        #Extend all accumulated distances upstream connected to those segments
+        #by the length of that segment
+        #Add to dataset
+        in_all_acc <- rbind(in_all_acc, acc_to_k_format, use.names=T) %>%
+          unique(by=c('HYRIV_ID_from', 'HYRIV_ID_to'))
         
-        all_acc <- rbindlist(list(all_acc, to_next, acc_to_k_format), use.names=T)
+        in_all_acc_diff <- in_all_acc[, .N] - in_all_acc_n
         
-        
-        ####REMOVE DUPLICATES
-        acc_to_k <- merge(all_acc, k_list_sub, 
+        #When multiple segments of the same stream order are linked one after 
+        #the other, need to extend the new accumulated distances multiple times
+        acc_to_k <- merge(in_all_acc[(ORD_STRA_to==strahler_order_from) & 
+                                       (dist_km < max_accdist) &
+                                       (MAIN_RIV %in% bas_sel),],
+                          k_list_sub, 
                           by.x='HYRIV_ID_to', by.y='HYRIV_ID',
-                          suffix=c('_upst', '_extra')) %>%
-          .[!(paste(HYRIV_ID_from, NEXT_DOWN, sep='_') %in% 
-                all_acc[, paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')]),]
+                          suffix=c('_upst', '_extra')) 
+        
       }
     } else {
-      all_acc <- rbindlist(list(all_acc, to_next), use.names=T)
+      in_all_acc <- rbindlist(list(in_all_acc, to_next), use.names=T)
     }
     remove(k_list_sub, to_next, acc_to_k)
   }  
   
-  return(all_acc)
+  return(in_all_acc)
 }
 
-for (k_comb_index in 1:nrow(k_dt)) {
-  k_i <- k_dt[k_comb_index, k_i]
-  k_j <- k_dt[k_comb_index, k_j]
-  print(k_i)
-  print(k_j)
+downdist_hydrorivers_basin_manual_outer <- function(
+    in_rivers_format, max_accdist = Inf) {
   
-  all_acc <- downdist_hydrorivers_basin_manual_inner(
-    in_rivers_format = rivers_sub,
-    in_all_acc = all_acc,
-    strahler_order_from = k_i,
-    strahler_order_to = k_j
-  )
+  sel_cols <- c('HYRIV_ID', 'NEXT_DOWN', 'LENGTH_KM_down', 
+                'ORD_STRA', 'ORD_STRA_down', 'MAIN_RIV')
+  new_cols <- c('HYRIV_ID_from', 'HYRIV_ID_to', 'dist_km', 
+                'ORD_STRA_from', 'ORD_STRA_to', 'MAIN_RIV')
+  
+  #Compute distance from outlet of first-order streams to outlet of second-order streams
+  k_max <- max(in_rivers_format$ORD_STRA_down, na.rm=T) #Get maximum Strahler order
+  k_dt <- expand.grid(1:k_max, 1:k_max) %>% #Get all combinations of upstream-downstream Strahler order
+    setDT %>%
+    setnames(c('k_i', "k_j")) %>%
+    .[order(k_i, k_j)] %>%
+    .[!(k_i==1 & k_j<=2) & k_j >= k_i,]
+  
+  #Compute distance between all first order streams with a second-order stream downstream
+  all_acc <- in_rivers_format[ORD_STRA==1 & ORD_STRA_down==2, ..sel_cols] %>% 
+    setnames(sel_cols, new_cols) 
+  
+  for (k_comb_index in 1:nrow(k_dt)) {
+    k_i <- k_dt[k_comb_index, k_i]
+    k_j <- k_dt[k_comb_index, k_j]
+    print(k_i)
+    print(k_j)
+    
+    all_acc <- downdist_hydrorivers_basin_manual_inner(
+      in_rivers_format = in_rivers_format,
+      in_all_acc = all_acc,
+      strahler_order_from = k_i,
+      strahler_order_to = k_j,
+      sel_cols = sel_cols,
+      new_cols = new_cols,
+      max_accdist=max_accdist
+    )
+  }
 }
 
+tictoc::tic()
+dist_dt_all_strahler <- downdist_hydrorivers_basin_manual_outer(
+  in_rivers_format = rivers_inland[nsegs_network < 6000,])
+tictoc::toc()
 
-# check<- all_acc[!duplicated(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')),]
-# check2 <-dist_dt_all[MAIN_RIV==20268761,]
-# dist_dt_all[MAIN_RIV==20268761,][
-#   !(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_') %in%
-#     all_acc[,  paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')]),]
+
+check<- all_acc[!duplicated(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')),]
+check2 <-dist_dt_all[MAIN_RIV== 20071308,]
+dist_dt_all[MAIN_RIV== 20071308,][
+  !(paste(HYRIV_ID_from, HYRIV_ID_to, sep='_') %in%
+    all_acc[,  paste(HYRIV_ID_from, HYRIV_ID_to, sep='_')]),]
